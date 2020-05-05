@@ -35,7 +35,7 @@ config = dict(
     num_epochs=300,
     checkpoints=[],
     num_train_tracking_batches=1,
-    optimizer_batch_size=128,  # per worker
+    optimizer_batch_size=256,  # per worker
     optimizer_conv_learning_rate=0.1,  # tuned for batch size 128
     optimizer_decay_at_epochs=[150, 250],
     optimizer_decay_with_factor=10.0,
@@ -68,6 +68,8 @@ output_dir = "./output.tmp"  # will be overwritten by run.py
 
 
 def main():
+    global begin_time
+    begin_time = time.time()
     torch.manual_seed(config["seed"] + config["rank"])
     np.random.seed(config["seed"] + config["rank"])
 
@@ -86,7 +88,7 @@ def main():
         torch.distributed.init_process_group(
             backend=config["distributed_backend"],
             init_method="file://" + os.path.abspath(config["distributed_init_file"]),
-            timeout=datetime.timedelta(seconds=120),
+            timeout=datetime.timedelta(seconds=10),
             world_size=config["n_workers"],
             rank=config["rank"],
         )
@@ -101,6 +103,16 @@ def main():
     momenta = [torch.empty_like(param) for param in task.state]  # need initialization
     send_buffers = [torch.zeros_like(param) for param in task.state]
     for epoch in range(config["num_epochs"]):
+        if epoch == 5:
+            config["optimizer_reducer"] = "RankKReducer"
+            config["optimizer_reducer_rank"] = 4
+            config["optimizer_memory"] = True
+            config["optimizer_reducer_reuse_query"] = True
+            config["optimizer_reducer_n_power_iterations"] = 0
+            reducer = get_reducer(device, timer)
+            if config["rank"] == 0:
+                print(f"Epoch:{epoch} Reducer is changed to:{reducer}")
+
         epoch_metrics = MeanAccumulator()
         info({"state.progress": float(epoch) / config["num_epochs"], "state.current_epoch": epoch})
 
@@ -286,7 +298,7 @@ def main():
                 )
                 # Save running average model @TODO
 
-        print(timer.summary())
+        # print(timer.summary())
         if config["rank"] == 0:
             timer.save_summary(os.path.join(output_dir, "timer_summary.json"))
 
@@ -342,7 +354,7 @@ def get_learning_rate(epoch, parameter_name):
 
 def is_conv_param(parameter_name):
     """
-    Says whether this parameter is a conv linear layer that 
+    Says whether this parameter is a conv linear layer that
     needs a different treatment from the other weights
     """
     return "conv" in parameter_name and "weight" in parameter_name
@@ -457,7 +469,11 @@ def log_metric(name, values, tags={}):
     for key, tag in tags.items():
         tag_list.append(f"{key}:{tag}")
     tags = ", ".join(tag_list)
-    print("{name:30s} - {values} ({tags})".format(name=name, values=values, tags=tags))
+    global begin_time
+    curr_time = time.time()-begin_time
+    if 'last_accuracy' in name and 'split:test' in tags:
+        print("Top1_accuracy - {values}, time:{time:.2f}".format(values=values, time=curr_time))
+        # print("{name:30s} - {values} ({tags})".format(name=name, values=values, tags=tags))
 
 
 def info(*args, **kwargs):
